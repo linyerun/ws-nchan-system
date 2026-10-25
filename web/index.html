@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nchan Push Lab · 实时推送实验台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">N</div>
+      <div class="brand-text">
+        <h1>Nchan Push Lab</h1>
+        <p>nginx + Nchan · Go 控制面 · Redis 全局 Session</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="connState" class="pill state offline"><i></i><span>未连接</span></span>
+      <span id="nodeBadge" class="pill ghost">node —</span>
+      <span id="onlineCount" class="pill ghost">0 在线</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="card">
+        <div class="card-head">
+          <h2>身份</h2>
+          <span class="card-hint">HMAC 签名 token</span>
+        </div>
+        <label class="field">
+          <span>用户 ID</span>
+          <input id="uidInput" maxlength="32" autocomplete="off" spellcheck="false" placeholder="alice">
+        </label>
+        <button id="connectBtn" class="btn primary">连接并订阅</button>
+        <p class="hint">新窗口用 <code>?uid=bob</code> 打开，即可模拟第二个用户。</p>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>在线用户</h2>
+          <span id="onlineHint" class="card-hint">—</span>
+        </div>
+        <ul id="onlineList" class="list">
+          <li class="empty">连接后显示</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>房间</h2>
+          <span class="card-hint">Redis Set</span>
+        </div>
+        <form id="roomForm" class="inline-form">
+          <input id="roomInput" maxlength="32" autocomplete="off" spellcheck="false" placeholder="room id">
+          <button class="btn small" type="submit">加入</button>
+        </form>
+        <ul id="roomList" class="list">
+          <li class="empty">尚未加入房间</li>
+        </ul>
+      </section>
+
+      <section class="card meta-card">
+        <div class="meta-row"><span>Presence TTL</span><b id="ttlValue">—</b></div>
+        <div class="meta-row"><span>心跳间隔</span><b id="hbValue">—</b></div>
+        <div class="meta-row"><span>重连次数</span><b id="retryValue">0</b></div>
+        <div class="meta-row"><span>下行通道</span><b id="channelValue">—</b></div>
+      </section>
+    </aside>
+
+    <section class="panel">
+      <div class="stream-head">
+        <div>
+          <h2>消息流</h2>
+          <p>WebSocket 只做下行；上行走 HTTP，业务协议不进入 Nchan</p>
+        </div>
+        <button id="clearBtn" class="btn ghost small">清空</button>
+      </div>
+
+      <div id="stream" class="stream" aria-live="polite"></div>
+
+      <div class="composer">
+        <div class="target-row">
+          <label class="field compact">
+            <span>推送目标</span>
+            <select id="targetType">
+              <option value="user">定向用户</option>
+              <option value="room">房间</option>
+              <option value="broadcast">全量广播</option>
+            </select>
+          </label>
+          <label class="field compact grow">
+            <span id="targetLabel">用户 ID</span>
+            <input id="targetId" list="targetOptions" autocomplete="off" spellcheck="false" placeholder="bob">
+            <datalist id="targetOptions"></datalist>
+          </label>
+        </div>
+        <div class="input-row">
+          <textarea id="messageInput" rows="1" placeholder="输入消息，Enter 发送，Shift + Enter 换行" disabled></textarea>
+          <button id="sendBtn" class="btn primary send" disabled>发送</button>
+        </div>
+        <div id="sendHint" class="hint">连接后可发送消息</div>
+      </div>
+
+      <footer class="statsbar">
+        <span class="stat">published <b id="statPublished">0</b></span>
+        <span class="stat">fanout <b id="statFanout">0</b></span>
+        <span class="stat">nchan ok <b id="statBridge">0</b></span>
+        <span class="stat">bridge err <b id="statBridgeErr">0</b></span>
+        <span class="stat">nodes <b id="statNodes">—</b></span>
+      </footer>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>

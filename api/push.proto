@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package push.v1;
+
+option go_package = "ws-nchan-system/internal/pb;pb";
+
+// PushService is the internal high-throughput publish entry.
+service PushService {
+  rpc Publish(PublishRequest) returns (PublishResponse);
+}
+
+message PublishRequest {
+  // Business caller identity, shown to end users.
+  string from = 1;
+  // user | room | broadcast
+  string target_type = 2;
+  // uid for user, room id for room, ignored for broadcast
+  string target_id = 3;
+  // JSON object delivered to clients, e.g. {"text":"hello"}
+  string payload_json = 4;
+}
+
+message PublishResponse {
+  string msg_id = 1;
+  int32 online_recipients = 2;
+  int32 offline_recipients = 3;
+}

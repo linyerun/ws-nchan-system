@@ -1,0 +1,261 @@
+# =============================================================================
+# ws-nchan-system 本地演示编排文件
+# =============================================================================
+#
+# 一句话说明：这是一个“可横向扩展的消息推送系统”，用 Docker Compose 在本地
+# 拉起 1 个 Redis + 2 个对称节点（node1 / node2），每个节点 = Go 应用 + Nginx(nchan)。
+#
+# 一个节点内部的请求流向：
+#
+#   浏览器
+#     │  (1) 拿 token   GET  http://localhost:18080/api/...        ─┐
+#     │  (2) 订阅推送   WS   ws://localhost:18080/ws?token=...      │
+#     │  (3) 打开页面   GET  http://localhost:18080/                │
+#     ▼                                                            │
+#   ┌─────────────────────────── node1-nginx (nchan) ───────────────┴─────┐
+#   │  /            → 直接返回 ./web 里的静态页面                          │
+#   │  /api/        → 反向代理给 node1-app:8080（登录、发消息等 REST 接口）│
+#   │  /_auth       → 内部子请求，问 Go “这个 token 是谁”，并登记在线状态  │
+#   │  /ws          → 由 nchan 接管长连接，一个用户一个 channel（u:<user>）│
+#   │  /internal/pub→ 只有 Docker 内网 + 共享密钥才能调用，用于“往里推消息”│
+#   └─────────────────────────────────────────────────────────────────────┘
+#                                  ▲  发布(publish)
+#                                  │
+#   node1-app (Go) ── 订阅 Redis 频道 ── redis ── 订阅 Redis 频道 ── node2-app (Go)
+#        │                                                             │
+#        └──────────────── 两个节点通过 Redis 做跨节点广播 ─────────────┘
+#
+# 关键设计：WebSocket 连接由 Nginx 的 nchan 模块直接持有，Go 进程不在消息数据
+# 通路上。Go 只负责：鉴权、写 Redis、以及把 Redis 里的消息“桥接”到本机 nchan。
+# 所以节点可以随便加：任意节点写的消息都会经 Redis 广播到所有节点。
+#
+# 常用命令（Makefile 里有封装）：
+#   make up          # 只启动 node1（默认 profile，日常开发用这个）
+#   make up-cluster  # 额外启动 node2，演示跨节点推送
+#   make down        # 停止并删除容器（会带上 cluster profile，保证 node2 也被清理）
+#   docker compose --profile cluster logs -f
+#
+# 注意：app 镜像里的 /app/server 是“预先交叉编译好的 Linux 二进制”，
+# 不是镜像内编译的。所以必须先 make build-linux（生成 bin/server-linux）再 build，
+# 直接用 docker compose up 会在 COPY 那一步失败。
+# =============================================================================
+
+# Compose 工程名。容器、网络、卷都会带上这个前缀，避免和别的项目重名。
+name: ws-nchan
+
+# -----------------------------------------------------------------------------
+# 顶层 x-* 开头的键不是服务，Compose 会忽略它们，只当作 YAML 锚点（anchor）复用。
+# -----------------------------------------------------------------------------
+
+# 所有 Go 应用共享的环境变量。用 &common-env 定义，服务里用 <<: *common-env 展开。
+# 这些值都能在 internal/config/config.go 里找到对应字段和默认值。
+x-common-env: &common-env
+  # Redis 地址。这里用服务名 redis 而不是 IP，靠 Docker 内置 DNS 解析成容器 IP。
+  REDIS_ADDR: redis:6379
+  # 给客户端签发 token 的 HMAC 密钥。演示用固定值，生产必须换成随机密钥。
+  TOKEN_SECRET: dev-secret-change-me
+  # 节点之间/Go 与 Nginx 之间的共享密钥，用于 /internal/pub 的内网调用校验。
+  INTERNAL_TOKEN: dev-internal-token
+  # 开发模式开关，字符串 "true"（环境变量只能是字符串）。
+  # 打开后会放宽一些限制，方便本地调试。
+  DEV_MODE: "true"
+  # 客户端 token 有效期：1 小时（Go 的 time.ParseDuration 格式）。
+  TOKEN_TTL: 1h
+  # “在线状态”在 Redis 里的过期时间：20 秒。
+  # 客户端心跳续期，超过 20 秒没续上就算离线。
+  PRESENCE_TTL: 20s
+  # 客户端应该多久发一次心跳：5 秒（一般是把此值下发给前端/客户端）。
+  HEARTBEAT_INTERVAL: 5s
+  # 节点注册信息在 Redis 里的过期时间：15 秒。
+  NODE_TTL: 15s
+  # 后台清理协程多久跑一次，清理过期的节点/在线记录：10 秒。
+  REAP_INTERVAL: 10s
+
+# Go 应用的公共模板。node1-app / node2-app 用 <<: *app 继承，只需要写不同的部分。
+x-app: &app
+  build:
+    # 构建上下文是项目根目录，因为 Dockerfile 里要 COPY bin/server-linux。
+    context: .
+    dockerfile: deploy/app.Dockerfile
+  # 构建出来的本地镜像名。打上 :local 后缀，避免误推到公共仓库。
+  image: ws-nchan-app:local
+  # 除非手动 docker stop，否则挂了就自动重启。本地演示很省心。
+  restart: unless-stopped
+  # 提高单进程可打开的文件描述符上限。WebSocket 场景下每条连接都是一个 fd，
+  # 64 位 linux 默认 1024 很容易被打满，所以调到 65536。
+  # （Nginx 侧对应配置 worker_rlimit_nofile 65536。）
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
+  # 依赖 Redis。condition: service_healthy 表示“等 Redis 健康检查通过”再启动，
+  # 而不是仅仅“容器已创建”。这样避免应用启动时连不上 Redis 直接退出。
+  depends_on:
+    redis:
+      condition: service_healthy
+
+# Nginx + nchan 节点的公共模板。
+x-nginx: &nginx
+  # 从项目内的 Dockerfile 构建，不依赖机器上预置的 nchan 镜像。
+  # 基础镜像是公开的 debian:trixie-slim，构建时安装 nginx + libnginx-mod-nchan。
+  # 如果 Debian 官方源不可达，Dockerfile 默认改用 mirrors.aliyun.com；
+  # 可用 DEBIAN_MIRROR=deb.debian.org make up 覆盖。
+  build:
+    context: .
+    dockerfile: deploy/nginx.Dockerfile
+    args:
+      DEBIAN_MIRROR: ${DEBIAN_MIRROR:-mirrors.aliyun.com}
+  image: ws-nchan-nginx:local
+  restart: unless-stopped
+  # 和 app 一样抬高 fd 上限：每条 WebSocket 长连接都占用一个 fd。
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
+  # 启动命令做三件事：
+  # 1) 用 sed 把配置模板里的 @NODE@、@INTERNAL_TOKEN@ 替换成当前容器的环境变量；
+  #    结果写到 /etc/nginx/nginx.conf（容器内可写）。这里没用 envsubst，因为
+  #    官方 nginx 镜像大多不带 gettext 工具。
+  # 2) $$$$NODE 里的 $ 是写给 Compose 的：$$ 会被 Compose 还原成一个 $，
+  #    所以最终传给 shell 的是 $NODE / $INTERNAL_TOKEN，由容器内 shell 展开，
+  #    而不是在宿主机 Compose 解析阶段就被替换掉。
+  # 3) exec nginx：让 nginx 成为 PID 1，能正确收到 docker stop 的 SIGQUIT/SIGTERM
+  #    并优雅关闭；'daemon off;' 让它留在前台，容器才不会立刻退出。
+  command:
+    - sh
+    - -c
+    - sed -e "s/@NODE@/$$NODE/g" -e "s/@INTERNAL_TOKEN@/$$INTERNAL_TOKEN/g" /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'
+  volumes:
+    # 配置模板只读挂载：宿主机改完配置后重启容器即可生效，不用重新构建镜像。
+    - ./deploy/nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+    # 静态前端页面只读挂载。改 ./web 里的文件，刷新浏览器就能看到效果。
+    # （只是为了演示方便；生产一般会做成静态资源镜像。）
+    - ./web:/usr/share/nginx/html:ro
+
+# -----------------------------------------------------------------------------
+# 真正的服务定义。node2 的两个服务带 profiles，默认不启动。
+# -----------------------------------------------------------------------------
+services:
+  # 共享 Redis：三个用途
+  #   1) 跨节点消息广播（Pub/Sub）——node1 写、node2 也能收到；
+  #   2) 在线状态、节点注册表；
+  #   3) 业务数据的简单存储（演示性质）。
+  redis:
+    image: redis:8-alpine
+    container_name: ws-nchan-redis
+    # 关闭所有持久化：
+    #   --save ""          不生成 RDB 快照
+    #   --appendonly no    不写 AOF 日志
+    # 目的：重启后数据干净，每次演示都是全新状态；也不在磁盘上留垃圾。
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      # 端口映射格式是 "宿主机端口:容器端口"。
+      # 宿主机用 16379 是为了避免和本机已有的 6379 Redis 冲突。
+      # 如果 16379 也被占用，改冒号左边的数字即可（容器内部端口不用动）。
+      - "16379:6379"
+    # 健康检查：每 2 秒执行一次 redis-cli ping，最多连续失败 30 次。
+    # app 的 depends_on 等的就是这个状态，所以 Redis 没就绪时 app 不会启动。
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # ---------------------------- 节点 1（默认启动） ----------------------------
+  # node1 的 Go 应用。
+  node1-app:
+    <<: *app
+    container_name: ws-nchan-node1-app
+    environment:
+      <<: *common-env
+      # 本节点唯一标识。心跳、节点注册表、日志里都用它区分节点。
+      NODE_ID: node1
+      # 桥接器（bridge）把 Redis 里收到的消息发布到本机 nchan 时的地址。
+      # 走同节点的 nginx 容器，用服务名 node1-nginx 解析（容器内 80 端口）。
+      NCHAN_PUB_URL: http://node1-nginx/internal/pub
+    ports:
+      # 宿主机 19090 → 容器 9090。9090 是 gRPC 端口（对外提供 PushService，
+      # 可以用 cmd/pushcli 或 e2e 脚本直接调用）。Web 用户不经过这里。
+      - "19090:9090"
+    # 健康检查：容器内访问自己的 /healthz。app 是 Alpine 镜像，用 wget 即可。
+    # 注意 8080 是 HTTP/API 端口，只在容器网络内使用，没有映射到宿主机。
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  # node1 的 Nginx(nchan) 网关，也是浏览器访问的唯一入口。
+  node1-nginx:
+    <<: *nginx
+    container_name: ws-nchan-node1-nginx
+    environment:
+      # 这两个变量会被启动命令里的 sed 替换进 nginx.conf：
+      #   NODE           → upstream 指向 node1-app:8080
+      #   INTERNAL_TOKEN → 校验 /internal/pub 的 X-Publisher-Token 请求头
+      NODE: node1
+      INTERNAL_TOKEN: dev-internal-token
+    depends_on:
+      # 等 app 健康后再启动 nginx，避免 nginx 起来时 upstream 还是空的。
+      node1-app:
+        condition: service_healthy
+    ports:
+      # 宿主机 18080 → 容器 80。浏览器打开 http://localhost:18080 即可。
+      # 换成别的端口时只改左边；前端页面用的是相对路径，不需要改代码。
+      - "18080:80"
+
+  # ---------------------------- 节点 2（可选，集群演示） ----------------------------
+  # profiles: ["cluster"] 表示：只有执行 docker compose --profile cluster up
+  # 时才会创建这些服务。默认 make up 只有 node1，适合单机调试。
+  # node2 与 node1 完全对称，共享同一个 Redis，从而能互相收到对方写进去的消息。
+  node2-app:
+    <<: *app
+    profiles: ["cluster"]
+    container_name: ws-nchan-node2-app
+    environment:
+      <<: *common-env
+      NODE_ID: node2
+      NCHAN_PUB_URL: http://node2-nginx/internal/pub
+    ports:
+      # 宿主机 19091 → 容器 9090（gRPC）。
+      - "19091:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  node2-nginx:
+    <<: *nginx
+    profiles: ["cluster"]
+    container_name: ws-nchan-node2-nginx
+    environment:
+      NODE: node2
+      INTERNAL_TOKEN: dev-internal-token
+    depends_on:
+      node2-app:
+        condition: service_healthy
+    ports:
+      # 宿主机 18081 → 容器 80。演示时可以同时开两个浏览器窗口分别连两个节点，
+      # 在 A 节点发的消息能在 B 节点收到，验证跨节点广播。
+      - "18081:80"
+
+# -----------------------------------------------------------------------------
+# 端口对照表
+# -----------------------------------------------------------------------------
+#   宿主机        容器        用途
+#   16379    →   6379        Redis（可用 redis-cli -p 16379 连进去看数据）
+#   18080    →   80          node1 Web 入口（页面 / WebSocket / API）
+#   19090    →   9090        node1 gRPC 推送接口
+#   18081    →   80          node2 Web 入口（仅 cluster profile）
+#   19091    →   9090        node2 gRPC 推送接口（仅 cluster profile）
+#
+# 网络说明：所有服务都在 Compose 自动创建的默认 bridge 网络里，
+# 彼此可以用服务名互相访问（redis、node1-app、node1-nginx……）。
+# nginx 配置里写 resolver 127.0.0.11，就是 Docker 内置的 DNS 服务器，
+# 这样容器重建后 IP 变化也能重新解析。
+#
+# 安全边界：/internal/pub 只允许内网网段访问，并要求 X-Publisher-Token 请求头，
+# 所以外部无法通过 18080 伪造消息；真正的鉴权发生在 /ws 的 auth_request 子请求里。
+# 注意 access log 刻意不记录 query string，因为 WebSocket 的 token 放在 URL 上。
+# =============================================================================
