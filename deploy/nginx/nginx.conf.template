@@ -1,12 +1,30 @@
+# =============================================================================
+# Nchan Push Lab 网关配置模板
+# =============================================================================
+# 该文件会被容器启动命令用 sed 渲染成真正的 nginx.conf：
+#   @NODE@           -> 当前节点名（node1 / node2），用于 upstream 服务名
+#   @INTERNAL_TOKEN@ -> Go bridge 调用发布接口时携带的共享密钥
+#
+# 网关承担三件事：
+#   1. 提供静态前端页面；
+#   2. 把 /api/ 和 /healthz 反向代理给同节点的 Go 应用；
+#   3. 用 Nchan 模块直接持有 WebSocket 长连接，并负责扇出下发。
+#
+# 长连接不经过 Go：Go 只做鉴权、路由和消息桥接，因此 Go 重启不会断开在线连接。
+# =============================================================================
+
 load_module modules/ngx_nchan_module.so;
 
 worker_processes auto;
+# 每个 WebSocket 连接至少占用一个 fd，默认 1024 远远不够。
 worker_rlimit_nofile 65536;
 pid /run/nginx.pid;
 error_log /var/log/nginx/error.log warn;
 
 events {
+    # 单个 worker 的最大并发连接数；总容量约为 worker_processes * 10240。
     worker_connections 10240;
+    # 一次 accept 尽可能多地接收新连接，降低高并发建连时的系统调用次数。
     multi_accept on;
 }
 
@@ -14,7 +32,9 @@ http {
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
 
-    # Never log the query string: WebSocket tokens travel there.
+    # 自定义日志格式，刻意只记录 $uri 而不记录 $request（含 query string）。
+    # 原因：浏览器 WebSocket 无法自定义 Header，token 只能放在 URL query 中，
+    # 记录完整请求会把 token 写进访问日志。
     log_format demo '$remote_addr [$time_local] "$request_method $uri" '
                     '$status $body_bytes_sent rt=$request_time';
     access_log /var/log/nginx/access.log demo;
@@ -22,12 +42,20 @@ http {
     sendfile on;
     tcp_nopush on;
     keepalive_timeout 65;
+    # 普通 API 的请求体上限；推送 payload 不应该有 MB 级内容。
     client_max_body_size 1m;
 
+    # Docker 内置 DNS（127.0.0.11）。用变量式 upstream 解析时，
+    # 容器重建导致 IP 变化后也能在 valid 周期内重新解析。
     resolver 127.0.0.11 valid=10s ipv6=off;
 
+    # Nchan 的共享内存大小，仅在当前 nginx 进程内生效（单机资源）。
+    # 订阅关系、channel 元数据和每 channel 的缓冲消息都放在这里。
+    # 需要跨机共享 channel 状态时应启用 Nchan 的 Redis 引擎，
+    # 或继续沿用本项目的“Redis Pub/Sub + 各节点本地发布”模式。
     nchan_shared_memory_size 64m;
 
+    # 指向同节点的 Go 应用；keepalive 复用后端连接，降低 API 延迟。
     upstream app {
         server @NODE@-app:8080;
         keepalive 32;
@@ -37,26 +65,36 @@ http {
         listen 80;
         server_name _;
 
+        # 前端静态资源由 nginx 直接返回，不经过 Go。
         root /usr/share/nginx/html;
         index index.html;
 
+        # 单页应用回退：找不到文件时返回 index.html，由前端路由处理。
         location / {
             try_files $uri $uri/ /index.html;
         }
 
+        # 健康检查透传给 Go，供容器 healthcheck / 负载均衡探活使用。
         location = /healthz {
             proxy_pass http://app/healthz;
             proxy_http_version 1.1;
             proxy_set_header Connection "";
         }
 
-        # auth_request subrequest: validates the token and registers the
-        # user's presence. The response header becomes $auth_user.
+        # ---------------------------------------------------------------------
+        # WebSocket 建连的鉴权子请求（auth_request）
+        # ---------------------------------------------------------------------
+        # internal 表示该 location 不能被外部直接访问，只能由 nginx 内部发起。
+        # 子请求会带上原始请求 URI（含 token 与 uid），Go 校验 token：
+        #   - 成功：返回 204，并通过 X-User-Id 响应头告知身份；
+        #   - 失败：返回 401，nginx 会直接终止原始 WebSocket 握手。
+        # 同时 Go 会在这里写入 presence，实现“先注册、再订阅”。
         location = /_auth {
             internal;
             proxy_pass http://app/internal/auth;
             proxy_http_version 1.1;
             proxy_set_header Connection "";
+            # 鉴权不需要请求体，关闭 body 转发，避免无谓开销。
             proxy_pass_request_body off;
             proxy_set_header Content-Length "";
             proxy_set_header X-Original-URI $request_uri;
@@ -64,41 +102,66 @@ http {
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         }
 
-        # One socket per user, one Nchan channel per user. Nchan owns the
-        # connection from here on; Go is never in the data path.
+        # ---------------------------------------------------------------------
+        # WebSocket 订阅入口：一个用户一个 socket、一个 Nchan channel
+        # ---------------------------------------------------------------------
+        # 浏览器访问 ws://host/ws?token=...&uid=...
+        # 必须带 Upgrade: websocket，否则返回 426 Upgrade Required。
         location = /ws {
             if ($http_upgrade != "websocket") {
                 return 426;
             }
 
+            # 先做鉴权：未通过时不会进入下面的 nchan_subscriber。
             auth_request /_auth;
+            # 把鉴权响应头 X-User-Id 保存为变量，供频道名使用；
+            # $auth_error 保存子请求状态码，便于排查（当前未直接使用）。
             auth_request_set $auth_user $upstream_http_x_user_id;
             auth_request_set $auth_error $upstream_status;
 
+            # 以下三条让 Nchan 接管连接：
+            #   subscriber              -> 当前连接作为订阅者；
+            #   channel_id "u:$auth_user" -> 频道名由可信的鉴权结果决定，
+            #                                用户无法自行指定别人的频道；
+            #   buffer_length / timeout  -> 为新订阅者重放最近 60s、最多 50 条消息。
+            # 注意：缓冲只是重连体验优化，不保证可靠投递；
+            # 重复帧由前端按 Envelope.ID 去重。
             nchan_subscriber;
             nchan_channel_id "u:$auth_user";
             nchan_message_buffer_length 50;
             nchan_message_timeout 60s;
         }
 
-        # Local publish endpoint, reachable only from the Docker network.
-        # The Go bridge POSTs here after receiving a Redis fan-out message.
+        # ---------------------------------------------------------------------
+        # 本地发布入口（只允许内网调用）
+        # ---------------------------------------------------------------------
+        # 目标节点的 Go bridge 从 Redis 收到消息后 POST 到这里，
+        # 由 Nchan 把消息广播给该 channel 的所有订阅者。
+        # 路径中的频道名被正则捕获为 $1（例如 /internal/pub/u:alice -> u:alice）。
         location ~ ^/internal/pub/(.+)$ {
+            # 只允许本机与 Docker 私有网段访问，公网来源一律拒绝。
             allow 127.0.0.1;
             allow 10.0.0.0/8;
             allow 172.16.0.0/12;
             allow 192.168.0.0/16;
             deny all;
 
-            # Defense in depth: the bridge must present the shared secret.
+            # 纵深防御：即使来源 IP 在内网，也必须携带共享密钥。
+            # 密钥由 INTERNAL_TOKEN 环境变量在容器启动时注入。
             if ($http_x_publisher_token != "@INTERNAL_TOKEN@") {
                 return 403;
             }
 
+            # 本 location 作为发布者处理，频道名取正则捕获组 $1。
             nchan_publisher;
             nchan_channel_id $1;
         }
 
+        # ---------------------------------------------------------------------
+        # REST API 反向代理
+        # ---------------------------------------------------------------------
+        # 包含 /api/dev/token、心跳、下线、推送、房间管理等。
+        # 鉴权在 Go 层完成（Bearer token），nginx 只做透传。
         location /api/ {
             proxy_pass http://app;
             proxy_http_version 1.1;

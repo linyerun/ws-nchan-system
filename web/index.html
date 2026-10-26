@@ -7,8 +7,12 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- 纯装饰背景网格，不参与交互 -->
   <div class="bg-grid" aria-hidden="true"></div>
 
+  <!-- =====================================================================
+       顶栏：品牌信息 + 连接状态 + 当前节点 + 在线人数
+       ===================================================================== -->
   <header class="topbar">
     <div class="brand">
       <div class="brand-mark">N</div>
@@ -18,14 +22,21 @@
       </div>
     </div>
     <div class="topbar-right">
+      <!-- 连接状态胶囊：offline / connecting / online，由 app.js 动态切换 -->
       <span id="connState" class="pill state offline"><i></i><span>未连接</span></span>
+      <!-- 当前连接落在哪个 Go 节点（token 接口返回） -->
       <span id="nodeBadge" class="pill ghost">node —</span>
+      <!-- 全局在线人数（跨节点，来自 Redis） -->
       <span id="onlineCount" class="pill ghost">0 在线</span>
     </div>
   </header>
 
   <main class="layout">
+    <!-- ===================================================================
+         左侧栏：身份、在线用户、房间、运行时参数
+         =================================================================== -->
     <aside class="sidebar">
+      <!-- 身份卡片：输入 uid、获取 token 并建立 WebSocket -->
       <section class="card">
         <div class="card-head">
           <h2>身份</h2>
@@ -39,6 +50,7 @@
         <p class="hint">新窗口用 <code>?uid=bob</code> 打开，即可模拟第二个用户。</p>
       </section>
 
+      <!-- 在线用户列表：点击某个用户可快速把发送目标设为该用户 -->
       <section class="card">
         <div class="card-head">
           <h2>在线用户</h2>
@@ -49,6 +61,7 @@
         </ul>
       </section>
 
+      <!-- 房间卡片：加入/退出房间，展示成员在线比例（Redis Set） -->
       <section class="card">
         <div class="card-head">
           <h2>房间</h2>
@@ -63,6 +76,7 @@
         </ul>
       </section>
 
+      <!-- 运行时参数：由 token 接口下发，帮助观察 TTL/心跳/重连行为 -->
       <section class="card meta-card">
         <div class="meta-row"><span>Presence TTL</span><b id="ttlValue">—</b></div>
         <div class="meta-row"><span>心跳间隔</span><b id="hbValue">—</b></div>
@@ -71,6 +85,9 @@
       </section>
     </aside>
 
+    <!-- ===================================================================
+         右侧主面板：消息流 + 发送区 + 节点统计
+         =================================================================== -->
     <section class="panel">
       <div class="stream-head">
         <div>
@@ -80,8 +97,10 @@
         <button id="clearBtn" class="btn ghost small">清空</button>
       </div>
 
+      <!-- 消息与系统事件都渲染在这里（aria-live 便于读屏软件播报） -->
       <div id="stream" class="stream" aria-live="polite"></div>
 
+      <!-- 发送区：先选目标类型，再填目标 ID，最后输入内容 -->
       <div class="composer">
         <div class="target-row">
           <label class="field compact">
@@ -94,6 +113,7 @@
           </label>
           <label class="field compact grow">
             <span id="targetLabel">用户 ID</span>
+            <!-- datalist 提供在线用户/已加入房间的输入建议 -->
             <input id="targetId" list="targetOptions" autocomplete="off" spellcheck="false" placeholder="bob">
             <datalist id="targetOptions"></datalist>
           </label>
@@ -105,6 +125,7 @@
         <div id="sendHint" class="hint">连接后可发送消息</div>
       </div>
 
+      <!-- 底部统计：观察发布、扇出、bridge 与节点注册表状态 -->
       <footer class="statsbar">
         <span class="stat">published <b id="statPublished">0</b></span>
         <span class="stat">fanout <b id="statFanout">0</b></span>
@@ -115,6 +136,7 @@
     </section>
   </main>
 
+  <!-- 全局轻提示：表单校验失败、发送失败等 -->
   <div id="toast" class="toast" role="status"></div>
   <script src="app.js"></script>
 </body>

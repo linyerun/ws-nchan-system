@@ -1,27 +1,46 @@
+// 推送系统的内部 gRPC 协议定义。
+//
+// 该接口面向业务系统（而非浏览器），用于高频发布消息。
+// 服务端实现见 internal/grpcapi，生成的 Go 代码已提交到 internal/pb，
+// 构建时不需要安装 protoc。
+//
+// 鉴权：请求 metadata 必须携带 x-internal-token，值为 INTERNAL_TOKEN。
 syntax = "proto3";
 
 package push.v1;
 
 option go_package = "ws-nchan-system/internal/pb;pb";
 
-// PushService is the internal high-throughput publish entry.
+// PushService 是内部高吞吐发布入口。
 service PushService {
+  // Publish 把一条消息投递给指定目标。
+  // 成功返回消息 ID 与在线/离线接收者数量；
+  // token 非法返回 Unauthenticated，参数错误返回 InvalidArgument。
   rpc Publish(PublishRequest) returns (PublishResponse);
 }
 
+// PublishRequest 是一次发布请求。
 message PublishRequest {
-  // Business caller identity, shown to end users.
+  // 业务调用方标识，会展示给最终用户（例如 "ops"）。
+  // 为空时服务端默认为 "server"。
   string from = 1;
-  // user | room | broadcast
+  // 目标类型：user | room | broadcast。
   string target_type = 2;
-  // uid for user, room id for room, ignored for broadcast
+  // target_type=user 时为 uid；room 时为房间 ID；broadcast 时忽略。
   string target_id = 3;
-  // JSON object delivered to clients, e.g. {"text":"hello"}
+  // 下发给客户端的 JSON 对象字符串，例如 {"text":"hello"}。
+  // 服务端只校验它是合法 JSON 对象，不解析具体业务字段。
   string payload_json = 4;
 }
 
+// PublishResponse 是发布结果统计。
 message PublishResponse {
+  // 本次发布的唯一消息 ID，所有接收者共享，用于前端去重。
   string msg_id = 1;
+  // 成功定位到在线节点并完成 Redis 投递的接收者数量。
   int32 online_recipients = 2;
+  // 目标中不在线的接收者数量。
   int32 offline_recipients = 3;
+  // 注意：gRPC 协议暂未暴露 failed_recipients，
+  // 该值可在 HTTP /api/push 的响应中查看。
 }

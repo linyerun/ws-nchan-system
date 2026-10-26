@@ -1,3 +1,13 @@
+/* =============================================================================
+   Nchan Push Lab 样式表
+   -----------------------------------------------------------------------------
+   页面是一个单页实验台：左侧为状态栏（身份/在线用户/房间/运行参数），
+   右侧为消息流与发送区。整体采用深色玻璃拟态风格，纯手写 CSS，无框架依赖。
+   ============================================================================= */
+
+/* -----------------------------------------------------------------------------
+   1. 设计变量：颜色、圆角与等宽字体统一从这里取值，方便整体换肤。
+   ----------------------------------------------------------------------------- */
 :root {
   --bg: #070b12;
   --bg-soft: #0b1220;
@@ -17,12 +27,16 @@
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
+/* -----------------------------------------------------------------------------
+   2. 全局重置与页面背景
+   ----------------------------------------------------------------------------- */
 * { box-sizing: border-box; }
 
 html, body { height: 100%; }
 
 body {
   margin: 0;
+  /* 两团径向渐变叠在深色底上，形成左上冷色、右下紫色的氛围光。 */
   background: radial-gradient(1100px 600px at 12% -10%, rgba(56, 189, 248, 0.16), transparent 60%),
               radial-gradient(900px 600px at 100% 110%, rgba(167, 139, 250, 0.12), transparent 55%),
               var(--bg);
@@ -33,6 +47,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 固定背景网格：用两条 1px 线性渐变重复平铺，再用 mask 让网格从上往下淡出。 */
 .bg-grid {
   position: fixed;
   inset: 0;
@@ -44,6 +59,9 @@ body {
   mask-image: radial-gradient(1000px 700px at 50% 0%, #000 30%, transparent 85%);
 }
 
+/* -----------------------------------------------------------------------------
+   3. 顶栏、品牌与状态胶囊
+   ----------------------------------------------------------------------------- */
 .topbar {
   position: relative;
   z-index: 2;
@@ -54,6 +72,7 @@ body {
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
   background: rgba(7, 11, 18, 0.72);
+  /* 毛玻璃：让滚动内容从半透明顶栏下透出。 */
   backdrop-filter: blur(14px);
 }
 
@@ -87,6 +106,7 @@ body {
 
 .topbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
+/* 通用胶囊：状态、节点名、在线人数共用 */
 .pill {
   display: inline-flex;
   align-items: center;
@@ -101,6 +121,7 @@ body {
   white-space: nowrap;
 }
 
+/* 胶囊左侧的小圆点，颜色跟随 currentColor */
 .pill i {
   width: 7px;
   height: 7px;
@@ -109,17 +130,22 @@ body {
   opacity: 0.7;
 }
 
+/* 三种连接状态：在线（绿+呼吸动画）、连接中（黄）、离线（灰） */
 .pill.state.online { color: var(--green); border-color: rgba(52, 211, 153, 0.35); background: rgba(16, 185, 129, 0.08); }
 .pill.state.online i { animation: pulse 1.8s ease-in-out infinite; }
 .pill.state.connecting { color: var(--amber); border-color: rgba(251, 191, 36, 0.3); background: rgba(251, 191, 36, 0.08); }
 .pill.state.offline { color: var(--muted); }
 .pill.ghost { background: transparent; }
 
+/* 在线状态的呼吸光圈动画 */
 @keyframes pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.5); }
   50% { opacity: 0.55; box-shadow: 0 0 0 5px rgba(52, 211, 153, 0); }
 }
 
+/* -----------------------------------------------------------------------------
+   4. 主布局：左侧固定 316px 侧栏 + 右侧自适应消息面板
+   ----------------------------------------------------------------------------- */
 .layout {
   position: relative;
   z-index: 1;
@@ -127,6 +153,7 @@ body {
   grid-template-columns: 316px minmax(0, 1fr);
   gap: 16px;
   padding: 16px 20px 20px;
+  /* 67px 是顶栏高度，保证页面整体不出现纵向滚动。 */
   height: calc(100vh - 67px);
 }
 
@@ -138,6 +165,9 @@ body {
   padding-right: 2px;
 }
 
+/* -----------------------------------------------------------------------------
+   5. 卡片与表单控件
+   ----------------------------------------------------------------------------- */
 .card {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -163,11 +193,13 @@ body {
   font-weight: 600;
 }
 
+/* 卡片右上角的技术说明文字（如 HMAC、Redis Set） */
 .card-hint { font-size: 10.5px; color: #5f7089; font-family: var(--mono); }
 
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field > span { font-size: 11px; color: var(--muted); }
 
+/* 所有文本输入框、下拉框共用同一套深色样式 */
 .field input, .field select, .inline-form input, #messageInput, #targetId {
   width: 100%;
   border: 1px solid var(--border);
@@ -181,6 +213,7 @@ body {
   font-family: inherit;
 }
 
+/* 聚焦态：蓝色描边 + 外发光 */
 .field input:focus, .field select:focus, .inline-form input:focus, #messageInput:focus, #targetId:focus {
   border-color: rgba(56, 189, 248, 0.55);
   box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
@@ -191,6 +224,9 @@ body {
   cursor: not-allowed;
 }
 
+/* -----------------------------------------------------------------------------
+   6. 按钮
+   ----------------------------------------------------------------------------- */
 .btn {
   border: 1px solid var(--border-strong);
   background: rgba(15, 23, 38, 0.8);
@@ -209,6 +245,7 @@ body {
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* 主按钮：蓝色渐变，用于“连接”和“发送”等主要动作 */
 .btn.primary {
   background: linear-gradient(140deg, #0ea5e9, #2563eb);
   border-color: rgba(56, 189, 248, 0.5);
@@ -222,6 +259,9 @@ body {
 
 #connectBtn { width: 100%; margin-top: 10px; }
 
+/* -----------------------------------------------------------------------------
+   7. 提示文案
+   ----------------------------------------------------------------------------- */
 .hint {
   margin: 10px 0 0;
   font-size: 11px;
@@ -238,10 +278,14 @@ body {
   border-radius: 5px;
 }
 
+/* -----------------------------------------------------------------------------
+   8. 列表：在线用户与房间
+   ----------------------------------------------------------------------------- */
 .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 
 .list .empty { color: #5f7089; font-size: 11.5px; padding: 6px 2px; }
 
+/* 在线用户条目：点击后可直接选为发送目标 */
 .user-item {
   display: flex;
   align-items: center;
@@ -254,8 +298,10 @@ body {
 }
 
 .user-item:hover { background: rgba(56, 189, 248, 0.07); border-color: rgba(56, 189, 248, 0.18); }
+/* 自己高亮显示 */
 .user-item.self { background: rgba(56, 189, 248, 0.06); border-color: rgba(56, 189, 248, 0.2); }
 
+/* 头像方块：取 uid 首字母 */
 .avatar {
   width: 26px;
   height: 26px;
@@ -278,6 +324,7 @@ body {
   font-size: 12.5px;
 }
 
+/* 节点标签：显示该用户连接落在哪个节点 */
 .node-tag {
   font-family: var(--mono);
   font-size: 9.5px;
@@ -334,6 +381,7 @@ body {
 }
 .leave-btn:hover { color: var(--red); background: rgba(248, 113, 113, 0.1); }
 
+/* 运行时参数表：固定在侧栏底部 */
 .meta-card { margin-top: auto; }
 .meta-row {
   display: flex;
@@ -347,6 +395,9 @@ body {
 .meta-row:last-child { border-bottom: 0; }
 .meta-row b { font-family: var(--mono); font-weight: 500; color: #cbd5e1; }
 
+/* -----------------------------------------------------------------------------
+   9. 右侧消息面板
+   ----------------------------------------------------------------------------- */
 .panel {
   display: flex;
   flex-direction: column;
@@ -370,6 +421,7 @@ body {
 .stream-head h2 { margin: 0; font-size: 13px; font-weight: 600; }
 .stream-head p { margin: 3px 0 0; font-size: 11px; color: var(--muted); }
 
+/* 消息流：占满剩余高度，内部滚动；smooth 让追加消息时滚动更自然 */
 .stream {
   flex: 1;
   min-height: 0;
@@ -381,10 +433,12 @@ body {
   scroll-behavior: smooth;
 }
 
+/* 细滚动条样式（仅 WebKit 内核） */
 .stream::-webkit-scrollbar, .sidebar::-webkit-scrollbar { width: 8px; }
 .stream::-webkit-scrollbar-thumb, .sidebar::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.18); border-radius: 8px; }
 .stream::-webkit-scrollbar-track, .sidebar::-webkit-scrollbar-track { background: transparent; }
 
+/* 系统事件提示（连接成功、错误、加入房间等），居中胶囊 */
 .event {
   align-self: center;
   max-width: 86%;
@@ -399,6 +453,7 @@ body {
 }
 .event.error { color: #fca5a5; border-color: rgba(248, 113, 113, 0.22); background: rgba(248, 113, 113, 0.06); }
 
+/* 聊天气泡：收到的消息靠左（in），自己发出的靠右（out） */
 .msg { display: flex; gap: 10px; align-items: flex-start; max-width: 86%; }
 .msg.out { align-self: flex-end; flex-direction: row-reverse; }
 
@@ -414,6 +469,7 @@ body {
   padding: 9px 12px 10px;
 }
 
+/* 自己发出的气泡用偏蓝的底色区分 */
 .msg.out .body {
   background: rgba(12, 43, 63, 0.55);
   border-color: rgba(56, 189, 248, 0.28);
@@ -431,6 +487,7 @@ body {
 
 .msg .author { color: #cbd5e1; font-weight: 600; font-size: 11.5px; }
 
+/* 消息类型徽标：direct / room / broadcast 三种配色 */
 .kind {
   font-size: 9.5px;
   padding: 1px 6px;
@@ -444,10 +501,15 @@ body {
 .kind.broadcast { color: #fcd34d; border-color: rgba(251, 191, 36, 0.3); background: rgba(251, 191, 36, 0.08); }
 
 .msg .time { font-family: var(--mono); font-size: 9.5px; color: #5f7089; }
+/* pre-wrap 保留用户输入的换行，word-break 防止长 URL 撑破气泡 */
 .msg .text { font-size: 13px; white-space: pre-wrap; word-break: break-word; }
 .msg .text pre { margin: 0; font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; }
+/* 发送方看到的投递统计（在线/离线/失败） */
 .msg .foot { margin-top: 6px; font-size: 10px; color: #5f7089; font-family: var(--mono); }
 
+/* -----------------------------------------------------------------------------
+   10. 发送区
+   ----------------------------------------------------------------------------- */
 .composer {
   border-top: 1px solid var(--border);
   padding: 12px 16px 10px;
@@ -465,6 +527,7 @@ body {
 
 .input-row { display: flex; gap: 8px; align-items: flex-end; }
 
+/* 多行输入框：默认 1 行，脚本按内容自动增高，最高 120px */
 #messageInput {
   flex: 1;
   resize: none;
@@ -477,6 +540,9 @@ body {
 .btn.send { height: 40px; padding: 0 20px; }
 .composer .hint { margin: 0; }
 
+/* -----------------------------------------------------------------------------
+   11. 底部统计栏与全局 Toast
+   ----------------------------------------------------------------------------- */
 .statsbar {
   display: flex;
   align-items: center;
@@ -492,6 +558,7 @@ body {
 
 .stat b { color: #94a3b8; font-weight: 500; margin-left: 3px; }
 
+/* Toast：固定在底部居中，默认透明且不接收点击，.show 时淡入上移 */
 .toast {
   position: fixed;
   left: 50%;
@@ -511,6 +578,9 @@ body {
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
+/* -----------------------------------------------------------------------------
+   12. 响应式：窄屏改为上下布局，侧栏落到消息面板下方
+   ----------------------------------------------------------------------------- */
 @media (max-width: 980px) {
   .layout {
     grid-template-columns: 1fr;

@@ -1,20 +1,38 @@
 #!/usr/bin/env node
-// Minimal load probe: N long-lived WebSockets, one broadcast, one direct hit.
-// Usage: CONNECTIONS=500 node scripts/loadtest.mjs
+/**
+ * 最小压测脚本：建立 N 条长连接，然后做一次全量广播和一次定向投递。
+ *
+ * 用法：
+ *   CONNECTIONS=500 CONCURRENCY=50 node scripts/loadtest.mjs
+ *   CONNECTIONS=300 make loadtest
+ *
+ * 观察指标：
+ *   - 建连总耗时与失败数；
+ *   - 广播的 API 耗时、到达率、端到端延迟 p50/p95/p99；
+ *   - 定向消息的端到端延迟；
+ *   - 批量下线耗时。
+ *
+ * 注意：脚本只做“最小验证”，不是严谨的基准测试；本机 Docker Desktop
+ * 的资源限制、端口映射和浏览器/Node 的 WebSocket 实现都会影响结果。
+ */
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:18080';
 const WS_BASE = BASE.replace(/^http/, 'ws');
+// 连接数；每条连接对应一个独立 uid 和一个 Nchan 订阅。
 const N = Number(process.env.CONNECTIONS || 200);
+// 建连/关闭阶段的并发度，避免瞬间打出太多 TCP 握手。
 const CONCURRENCY = Number(process.env.CONCURRENCY || 25);
 const RUN = Math.random().toString(36).slice(2, 6);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 计算百分位数；values 为空时返回 0。
 function percentile(values, p) {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))];
 }
 
+// 为压测 uid 获取 token。
 async function token(uid) {
   const res = await fetch(`${BASE}/api/dev/token?uid=${encodeURIComponent(uid)}`);
   const body = await res.json();
@@ -22,6 +40,10 @@ async function token(uid) {
   return body;
 }
 
+/**
+ * 建立单条 WebSocket，并记录建连耗时（openMs）。
+ * 返回的 client.received 预留给按消息统计的扩展场景（当前用 arrivals 统一统计）。
+ */
 async function connect(uid) {
   const t = await token(uid);
   const ws = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(t.token)}&uid=${encodeURIComponent(uid)}`);
@@ -40,6 +62,10 @@ async function connect(uid) {
   return client;
 }
 
+/**
+ * 简单并发池：最多 limit 个 worker 同时消费 items。
+ * results 按原始下标写入，保证顺序与输入一致。
+ */
 async function pool(items, limit, worker) {
   const results = [];
   let cursor = 0;
@@ -59,6 +85,9 @@ async function pool(items, limit, worker) {
   const t0 = performance.now();
   let failed = 0;
 
+  // ---------------------------------------------------------------------------
+  // 阶段 1：并发建连
+  // ---------------------------------------------------------------------------
   const clients = [];
   await pool(uids, CONCURRENCY, async (uid) => {
     try {
@@ -72,6 +101,9 @@ async function pool(items, limit, worker) {
   console.log(`connected ${clients.length}/${N} in ${connectMs.toFixed(0)}ms  (failed=${failed})`);
   if (!clients.length) process.exit(1);
 
+  // ---------------------------------------------------------------------------
+  // 阶段 2：为每条连接挂消息监听，按 msg_id 记录到达者和时间
+  // ---------------------------------------------------------------------------
   const sender = clients[0];
   const latencies = [];
   const arrivals = new Map();
@@ -86,9 +118,12 @@ async function pool(items, limit, worker) {
     });
   });
 
-  await sleep(1500); // let presence settle
+  // 等 presence 全部写入并稳定，避免把“建连尚未完成在线注册”算作离线。
+  await sleep(1500);
 
-  // Broadcast fan-out.
+  // ---------------------------------------------------------------------------
+  // 阶段 3：全量广播，统计到达率与端到端延迟
+  // ---------------------------------------------------------------------------
   const broadcastStart = performance.now();
   const bres = await fetch(`${BASE}/api/push`, {
     method: 'POST',
@@ -98,6 +133,7 @@ async function pool(items, limit, worker) {
   const bdata = await bres.json();
   console.log(`broadcast api: online=${bdata.online_recipients} failed=${bdata.failed_recipients} in ${(performance.now() - broadcastStart).toFixed(0)}ms`);
 
+  // 最多等 20s，直到所有客户端都收到或超时。
   const deadline = Date.now() + 20000;
   while (arrivals.get(bdata.msg_id)?.length !== clients.length && Date.now() < deadline) {
     await sleep(30);
@@ -108,7 +144,9 @@ async function pool(items, limit, worker) {
   console.log(`broadcast delivered to ${broadcastArrivals.length}/${clients.length} clients`);
   console.log(`  total ${(fanoutDone - broadcastStart).toFixed(0)}ms  p50=${percentile(latencies, 50).toFixed(0)}ms  p95=${percentile(latencies, 95).toFixed(0)}ms  p99=${percentile(latencies, 99).toFixed(0)}ms`);
 
-  // Direct message to the last client.
+  // ---------------------------------------------------------------------------
+  // 阶段 4：定向投递给最后一条连接，验证单点路径延迟
+  // ---------------------------------------------------------------------------
   const target = clients[clients.length - 1];
   const directStart = performance.now();
   const dres = await fetch(`${BASE}/api/push`, {
@@ -126,6 +164,10 @@ async function pool(items, limit, worker) {
   if (hit) directMs = hit.at - directStart;
   console.log(`direct delivery: ${hit ? `${directMs.toFixed(0)}ms` : 'TIMEOUT'}`);
 
+  // ---------------------------------------------------------------------------
+  // 阶段 5：批量清理。先调用 /api/logout 删除 presence，再关闭 socket。
+  // 这样比单纯 close 更快让在线列表归零，也验证下线接口在压力下的表现。
+  // ---------------------------------------------------------------------------
   console.log(`\nclosing ${clients.length} sockets...`);
   const closeStart = performance.now();
   await pool(clients, 50, async (c) => {
